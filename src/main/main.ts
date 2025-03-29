@@ -15,6 +15,42 @@ import log from 'electron-log';
 import MenuBuilder from './menu';
 import { resolveHtmlPath } from './util';
 
+import {benchmarkAllModels } from './llama-service';
+
+app
+  .whenReady()
+  .then(async () => {
+    createWindow();
+
+    // Check for benchmark mode
+    if (process.env.BENCHMARK === 'true') {
+      console.log("\n\n==================================================");
+      console.log("RUNNING LLM BENCHMARK - TESTING ALL MODELS");
+      console.log("==================================================\n");
+      
+      const prompt = "tell me about electron.js";
+      const results = await benchmarkAllModels(prompt);
+      
+      console.log("\n\n==================================================");
+      console.log("BENCHMARK RESULTS SUMMARY:");
+      console.log("==================================================");
+      results.forEach(result => {
+        if (result.error) {
+          console.log(`${result.model}: ERROR - ${result.error}`);
+        } else {
+          console.log(`${result.model}: ${result.metrics.tokensPerSec.toFixed(2)} tokens/sec`);
+          console.log(`  Setup: ${result.metrics.setupTime.toFixed(2)}s, Gen: ${result.metrics.generationTime.toFixed(2)}s`);
+        }
+      });
+      console.log("==================================================\n");
+    }
+    
+    app.on('activate', () => {
+      if (mainWindow === null) createWindow();
+    });
+  })
+  .catch(console.log);
+
 class AppUpdater {
   constructor() {
     log.transports.file.level = 'info';
@@ -101,24 +137,17 @@ const createWindow = async () => {
   const menuBuilder = new MenuBuilder(mainWindow);
   menuBuilder.buildMenu();
 
-  // Open urls in the user's browser
   mainWindow.webContents.setWindowOpenHandler((edata) => {
     shell.openExternal(edata.url);
     return { action: 'deny' };
   });
 
-  // Remove this if your app does not use auto updates
-  // eslint-disable-next-line
   new AppUpdater();
 };
 
-/**
- * Add event listeners...
- */
+
 
 app.on('window-all-closed', () => {
-  // Respect the OSX convention of having the application in memory even
-  // after all windows have been closed
   if (process.platform !== 'darwin') {
     app.quit();
   }
@@ -129,8 +158,6 @@ app
   .then(() => {
     createWindow();
     app.on('activate', () => {
-      // On macOS it's common to re-create a window in the app when the
-      // dock icon is clicked and there are no other windows open.
       if (mainWindow === null) createWindow();
     });
   })
