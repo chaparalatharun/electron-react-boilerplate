@@ -1,19 +1,54 @@
-import { app } from 'electron';
-import { spawn, execSync, exec } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import { EventEmitter } from 'events';
+import { app } from 'electron';
 
-export class LlamaService {
+// Interface for model options
+export interface ModelOptions {
+  temperature?: number;
+  topP?: number;
+  maxTokens?: number;
+  seed?: number;
+  contextSize?: number;
+  streaming?: boolean;
+}
+
+// Interface for model information
+export interface ModelInfo {
+  name: string;
+  path: string;
+  size: number;
+  formattedSize: string;
+  lastModified: Date;
+  isValid: boolean;
+  modelType: string;
+  quantization: string;
+}
+
+// Default model options
+const DEFAULT_OPTIONS: ModelOptions = {
+  temperature: 0.7,
+  topP: 0.9,
+  maxTokens: 500,
+  seed: 42,
+  contextSize: 2048,
+  streaming: false
+};
+
+export class LlamaService extends EventEmitter {
   private llamaBinaryPath: string;
   private libPath: string;
   private modelsDir: string;
   private logFilePath: string;
   private isLibraryReady: boolean = false;
-  private isBuildingLibrary: boolean = false;
-  private buildLogPath: string;
+  private activeModel: string | null = null;
+  private activeProcesses: Map<string, any> = new Map();
   
   constructor() {
+    super(); // Initialize EventEmitter
+    
     // Determine if we're in development or production mode
     const isDev = process.env.NODE_ENV === 'development';
     const appPath = app.getAppPath();
@@ -21,9 +56,9 @@ export class LlamaService {
     // Set up directory paths based on environment
     if (isDev) {
       // Development paths
-      this.llamaBinaryPath = path.join(appPath, 'src', 'main', 'llama', 'bin', 'llama-cli');
-      this.libPath = path.join(appPath, 'src', 'main', 'llama', 'lib');
-      this.modelsDir = path.join(appPath, 'src', 'main', 'llama', 'models');
+      this.llamaBinaryPath = path.join(appPath, 'assets', 'llama', 'bin', 'llama-cli');
+      this.libPath = path.join(appPath, 'assets', 'llama', 'lib');
+      this.modelsDir = path.join(appPath, 'assets', 'llama', 'models');
     } else {
       // Production paths - usually in the resources directory
       this.llamaBinaryPath = path.join(process.resourcesPath, 'llama', 'bin', 'llama-cli');
@@ -41,8 +76,7 @@ export class LlamaService {
       ? path.join(appPath, 'logs')
       : path.join(app.getPath('userData'), 'logs');
       
-    this.logFilePath = path.join(logDir, 'llama-benchmark.log');
-    this.buildLogPath = path.join(logDir, 'llama-build.log');
+    this.logFilePath = path.join(logDir, 'llama-service.log');
     
     // Ensure all the necessary directories exist
     this.ensureDirectoriesExist();
@@ -104,14 +138,14 @@ export class LlamaService {
    * Initialize service and check for required components
    */
   private initialize(): void {
-    // Check if library exists and build if needed
-    this.checkLibraryAndBuildIfNeeded();
+    // Check if library exists
+    this.checkLibraryExists();
   }
 
   /**
-   * Check if required library exists, and build it if needed
+   * Check if required library exists
    */
-  private checkLibraryAndBuildIfNeeded(): void {
+  private checkLibraryExists(): void {
     const libName = process.platform === 'win32' 
       ? 'llama.dll' 
       : process.platform === 'darwin' 
@@ -141,275 +175,12 @@ export class LlamaService {
       }
     }
     
-    console.log(`Library ${libName} not found. Will build or download when needed.`);
+    console.log(`Library ${libName} not found. Please run the build-llama script to generate it.`);
+    this.logError(`Required library ${libName} not found. Run 'npm run build-llama' to create it.`);
   }
 
   /**
-   * Build llama.cpp from source to get the library
-   * Returns a promise that resolves when build is complete
-   */
-  private async buildLibrary(): Promise<boolean> {
-    if (this.isBuildingLibrary) {
-      console.log('Library build already in progress');
-      return false;
-    }
-    
-    this.isBuildingLibrary = true;
-    console.log('Starting library build process...');
-    this.logInfo('Starting to build llama.cpp library');
-    
-    const tempDir = path.join(os.tmpdir(), 'llama-build-' + Date.now());
-    let success = false;
-    
-    try {
-      // Create temp directory for building
-      fs.mkdirSync(tempDir, { recursive: true });
-      console.log(`Created temp build directory: ${tempDir}`);
-      
-      // Log build steps
-      const logToFile = (message: string) => {
-        fs.appendFileSync(this.buildLogPath, `${new Date().toISOString()}: ${message}\n`);
-        console.log(message);
-      };
-      
-      logToFile('Cloning llama.cpp repository...');
-      
-      // Clone repository
-      await new Promise<void>((resolve, reject) => {
-        const gitProcess = spawn('git', [
-          'clone',
-          'https://github.com/ggerganov/llama.cpp.git',
-          tempDir,
-          '--depth=1'  // Shallow clone to speed up
-        ]);
-        
-        let output = '';
-        
-        gitProcess.stdout.on('data', (data) => {
-          output += data.toString();
-        });
-        
-        gitProcess.stderr.on('data', (data) => {
-          output += data.toString();
-        });
-        
-        gitProcess.on('close', (code) => {
-          if (code === 0) {
-            logToFile('Successfully cloned repository');
-            resolve();
-          } else {
-            logToFile(`Git clone failed with code ${code}: ${output}`);
-            reject(new Error(`Git clone failed with code ${code}`));
-          }
-        });
-        
-        gitProcess.on('error', (error) => {
-          logToFile(`Git process error: ${error.message}`);
-          reject(error);
-        });
-      });
-      
-      // Create build directory
-      const buildDir = path.join(tempDir, 'build');
-      fs.mkdirSync(buildDir, { recursive: true });
-      
-      logToFile('Configuring with CMake...');
-      
-      // Run CMake
-      await new Promise<void>((resolve, reject) => {
-        const cmakeProcess = spawn('cmake', [
-          '..',
-          '-DBUILD_SHARED_LIBS=ON',  // Ensure we build a shared library
-          '-DLLAMA_METAL=ON'         // Enable Metal support for macOS
-        ], {
-          cwd: buildDir
-        });
-        
-        let output = '';
-        
-        cmakeProcess.stdout.on('data', (data) => {
-          const text = data.toString();
-          output += text;
-          // Print CMake output in real-time for debugging
-          console.log(`CMake stdout: ${text}`);
-          logToFile(`CMake stdout: ${text}`);
-        });
-        
-        cmakeProcess.stderr.on('data', (data) => {
-          const text = data.toString();
-          output += text;
-          // Print CMake errors in real-time for debugging
-          console.error(`CMake stderr: ${text}`);
-          logToFile(`CMake stderr: ${text}`);
-        });
-        
-        cmakeProcess.on('close', (code) => {
-          if (code === 0) {
-            logToFile('CMake configuration successful');
-            console.log('CMake configuration successful');
-            resolve();
-          } else {
-            logToFile(`CMake configuration failed with code ${code}: ${output}`);
-            console.error(`CMake configuration failed with code ${code}: ${output}`);
-            reject(new Error(`CMake configuration failed with code ${code}`));
-          }
-        });
-        
-        cmakeProcess.on('error', (error) => {
-          logToFile(`CMake process error: ${error.message}`);
-          console.error(`CMake process error: ${error.message}`);
-          reject(error);
-        });
-      });
-      
-      logToFile('Building library with CMake...');
-      
-      // Build with CMake
-      await new Promise<void>((resolve, reject) => {
-        const buildProcess = spawn('cmake', [
-          '--build',
-          '.',
-          '--config',
-          'Release',
-          '--verbose'  // Add verbose flag to get more build information
-        ], {
-          cwd: buildDir
-        });
-        
-        let output = '';
-        
-        buildProcess.stdout.on('data', (data) => {
-          const text = data.toString();
-          output += text;
-          // Print build output in real-time for debugging
-          console.log(`Build stdout: ${text}`);
-          logToFile(`Build stdout: ${text}`);
-        });
-        
-        buildProcess.stderr.on('data', (data) => {
-          const text = data.toString();
-          output += text;
-          // Print build errors in real-time for debugging
-          console.error(`Build stderr: ${text}`);
-          logToFile(`Build stderr: ${text}`);
-        });
-        
-        buildProcess.on('close', (code) => {
-          if (code === 0) {
-            logToFile('Build successful');
-            console.log('Build successful');
-            resolve();
-          } else {
-            logToFile(`Build failed with code ${code}: ${output}`);
-            console.error(`Build failed with code ${code}: ${output}`);
-            reject(new Error(`Build failed with code ${code}`));
-          }
-        });
-        
-        buildProcess.on('error', (error) => {
-          logToFile(`Build process error: ${error.message}`);
-          console.error(`Build process error: ${error.message}`);
-          reject(error);
-        });
-      });
-      
-      // Find the built library and binary
-      const libName = process.platform === 'win32' 
-        ? 'llama.dll' 
-        : process.platform === 'darwin' 
-          ? 'libllama.dylib' 
-          : 'libllama.so';
-      
-      const binaryName = process.platform === 'win32' 
-        ? 'llama-cli.exe' 
-        : 'llama-cli';
-          
-      // Look for the library and binary files in the build directory
-      const libraryFiles: string[] = [];
-      const binaryFiles: string[] = [];
-      
-      const findFiles = (dir: string) => {
-        try {
-          const files = fs.readdirSync(dir);
-          for (const file of files) {
-            const fullPath = path.join(dir, file);
-            if (fs.statSync(fullPath).isDirectory()) {
-              findFiles(fullPath);
-            } else if (file === libName) {
-              libraryFiles.push(fullPath);
-            } else if (file === binaryName) {
-              binaryFiles.push(fullPath);
-            }
-          }
-        } catch (error) {
-          logToFile(`Error searching directory ${dir}: ${error}`);
-        }
-      };
-      
-      findFiles(buildDir);
-      
-      if (libraryFiles.length === 0) {
-        throw new Error(`Could not find built library file ${libName}`);
-      }
-      
-      // Use the first found library file
-      const builtLibPath = libraryFiles[0];
-      logToFile(`Found built library at: ${builtLibPath}`);
-      
-      // Copy library to our lib directory
-      const targetLibPath = path.join(this.libPath, libName);
-      fs.copyFileSync(builtLibPath, targetLibPath);
-      logToFile(`Copied library to: ${targetLibPath}`);
-      
-      // Copy the binary if found
-      if (binaryFiles.length === 0) {
-        logToFile(`WARNING: Could not find built binary ${binaryName}. The benchmarks may not work.`);
-      } else {
-        // Use the first found binary
-        const builtBinaryPath = binaryFiles[0];
-        logToFile(`Found built binary at: ${builtBinaryPath}`);
-        
-        // Copy and make executable
-        fs.copyFileSync(builtBinaryPath, this.llamaBinaryPath);
-        fs.chmodSync(this.llamaBinaryPath, 0o755); // Make executable
-        logToFile(`Copied binary to: ${this.llamaBinaryPath}`);
-      }
-      
-      success = true;
-      this.isLibraryReady = true;
-      logToFile('Library build and installation complete!');
-      
-    } catch (error) {
-      console.error(`Error building library: ${error}`);
-      this.logError(`Error building library: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      this.isBuildingLibrary = false;
-      
-      // Clean up temp directory (optional)
-      try {
-        // Commented out to preserve build files for debugging if needed
-        // fs.rmSync(tempDir, { recursive: true, force: true });
-        // console.log(`Removed temp build directory: ${tempDir}`);
-      } catch (error) {
-        console.error(`Error cleaning up temp directory: ${error}`);
-      }
-    }
-    
-    return success;
-  }
-
-  /**
-   * Download pre-built library (alternative to building from source)
-   * This is a fallback if building fails
-   */
-  private async downloadPrebuiltLibrary(): Promise<boolean> {
-    // Not implemented yet - would require hosting prebuilt libraries somewhere
-    console.log('Downloading prebuilt library not implemented yet');
-    return false;
-  }
-
-  /**
-   * Ensure library is ready - build or download if needed
+   * Ensure library is ready
    * Returns a promise that resolves when library is ready
    */
   public async ensureLibraryIsReady(): Promise<boolean> {
@@ -427,43 +198,9 @@ export class LlamaService {
       return true;
     }
     
-    // If already building, wait for it to complete
-    if (this.isBuildingLibrary) {
-      console.log('Library build already in progress, waiting...');
-      
-      // Wait for build to complete
-      while (this.isBuildingLibrary) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-      
-      // Check if it succeeded
-      if (fs.existsSync(libFullPath)) {
-        this.isLibraryReady = true;
-        return true;
-      }
-      
-      return false;
-    }
-    
-    // Try to build
-    console.log('Library not found, attempting to build...');
-    const buildSuccess = await this.buildLibrary();
-    
-    if (buildSuccess) {
-      return true;
-    }
-    
-    // If build failed, try downloading prebuilt
-    console.log('Build failed, attempting to download prebuilt library...');
-    const downloadSuccess = await this.downloadPrebuiltLibrary();
-    
-    if (downloadSuccess) {
-      return true;
-    }
-    
-    // If all else fails
-    console.error('Could not obtain library by building or downloading');
-    this.logError('Failed to build or download required library. Please install manually.');
+    // Library is missing
+    console.error(`Required library ${libName} not found.`);
+    this.logError(`Required library ${libName} not found. Run 'npm run build-llama' to create it.`);
     return false;
   }
 
@@ -534,350 +271,395 @@ export class LlamaService {
   }
 
   /**
-   * Benchmark all models in the models directory
+   * Check model files and return detailed information about them
+   * @returns Promise that resolves with detailed model information
    */
-  public async benchmarkAllModels(prompt: string): Promise<any[]> {
-    console.log('Starting benchmark of all models...');
-    this.logInfo('Starting benchmark of all models');
+  public async checkModels(): Promise<ModelInfo[]> {
+    try {
+      // Get all model files
+      const modelPaths = this.getAvailableModels();
+      
+      if (modelPaths.length === 0) {
+        console.log('No model files found in the models directory.');
+        return [];
+      }
+      
+      console.log(`Found ${modelPaths.length} models:`);
+      
+      const modelInfo: ModelInfo[] = [];
+      
+      // Check each model file
+      for (const modelPath of modelPaths) {
+        const fileName = path.basename(modelPath);
+        const stats = fs.statSync(modelPath);
+        
+        // Get file size in a human-readable format
+        const sizeInMB = stats.size / (1024 * 1024);
+        const formattedSize = sizeInMB < 1000 
+          ? `${sizeInMB.toFixed(2)} MB` 
+          : `${(sizeInMB / 1024).toFixed(2)} GB`;
+        
+        console.log(`- ${fileName} (${formattedSize})`);
+        
+        // Try to validate the model by checking its header
+        let isValid = true;
+        let modelType = "Unknown";
+        let quantization = "Unknown";
+        
+        try {
+          // Read the first few bytes to check if it's a valid GGUF file
+          const header = Buffer.alloc(16);
+          const fd = fs.openSync(modelPath, 'r');
+          fs.readSync(fd, header, 0, 16, 0);
+          fs.closeSync(fd);
+          
+          // GGUF files start with "GGUF" in ASCII
+          if (header.toString('ascii', 0, 4) === 'GGUF') {
+            modelType = "GGUF";
+            
+            // Try to determine quantization from filename
+            if (fileName.includes('Q4_0')) quantization = "Q4_0";
+            else if (fileName.includes('Q4_K_M')) quantization = "Q4_K_M";
+            else if (fileName.includes('Q5_0')) quantization = "Q5_0";
+            else if (fileName.includes('Q5_K_M')) quantization = "Q5_K_M";
+            else if (fileName.includes('Q8_0')) quantization = "Q8_0";
+            else quantization = "Unknown";
+          } else {
+            isValid = false;
+          }
+        } catch (error) {
+          console.error(`Error validating model ${fileName}: ${error}`);
+          isValid = false;
+        }
+        
+        modelInfo.push({
+          name: fileName,
+          path: modelPath,
+          size: stats.size,
+          formattedSize,
+          lastModified: stats.mtime,
+          isValid,
+          modelType,
+          quantization
+        });
+      }
+      
+      return modelInfo;
+    } catch (error) {
+      console.error(`Error checking models: ${error}`);
+      this.logError(`Error checking models: ${error}`);
+      return [];
+    }
+  }
+
+  /**
+   * Load a specific model
+   * @param modelPath Path to the model file
+   * @returns Promise that resolves when the model is loaded
+   */
+  public async loadModel(modelPath: string): Promise<boolean> {
+    // Make sure library is ready
+    const libraryReady = await this.ensureLibraryIsReady();
+    if (!libraryReady) {
+      const errorMsg = 'Cannot load model because required library could not be found.';
+      console.error(errorMsg);
+      this.logError(errorMsg);
+      return false;
+    }
+
+    // If a path is given, use it directly
+    let fullModelPath = modelPath;
+    
+    // If just a name is given, look in the models directory
+    if (!path.isAbsolute(modelPath) && !modelPath.includes('/') && !modelPath.includes('\\')) {
+      const availableModels = this.getAvailableModels();
+      const matchingModels = availableModels.filter(m => path.basename(m).includes(modelPath));
+      
+      if (matchingModels.length === 0) {
+        console.error(`No model matching '${modelPath}' found in ${this.modelsDir}`);
+        return false;
+      }
+      
+      fullModelPath = matchingModels[0];
+    }
+    
+    // Check if the model file exists
+    if (!fs.existsSync(fullModelPath)) {
+      console.error(`Model file not found: ${fullModelPath}`);
+      return false;
+    }
+    
+    console.log(`Loading model: ${path.basename(fullModelPath)}`);
+    this.activeModel = fullModelPath;
+    return true;
+  }
+
+  /**
+   * Get the environment variables needed for llama process
+   */
+  private getProcessEnvironment(): NodeJS.ProcessEnv {
+    const env = { ...process.env };
+    
+    // Set dynamic library paths based on platform
+    if (process.platform === 'darwin') {
+      // macOS
+      env.DYLD_LIBRARY_PATH = [this.libPath, env.DYLD_LIBRARY_PATH].filter(Boolean).join(':');
+      env.DYLD_FALLBACK_LIBRARY_PATH = this.libPath;
+    } else if (process.platform === 'linux') {
+      // Linux
+      env.LD_LIBRARY_PATH = [this.libPath, env.LD_LIBRARY_PATH].filter(Boolean).join(':');
+    } else if (process.platform === 'win32') {
+      // Windows
+      env.PATH = [this.libPath, env.PATH].filter(Boolean).join(path.delimiter);
+    }
+    
+    return env;
+  }
+
+  /**
+   * Query a model with a prompt
+   * @param prompt The prompt to send to the model
+   * @param options Options for the model
+   * @returns Promise that resolves with the model's response
+   */
+  public async queryModel(prompt: string, options: ModelOptions = {}): Promise<string> {
+    if (!this.activeModel) {
+      throw new Error('No model loaded. Please call loadModel() first.');
+    }
+    
+    const modelPath = this.activeModel;
+    const mergedOptions = { ...DEFAULT_OPTIONS, ...options };
     
     // Make sure library is ready
     const libraryReady = await this.ensureLibraryIsReady();
     if (!libraryReady) {
-      const errorMsg = 'Cannot run benchmarks because required library could not be built or downloaded.';
-      console.error(errorMsg);
-      this.logError(errorMsg);
-      return [{ error: errorMsg }];
+      throw new Error('Required library not found. Run npm run build-llama to create it.');
     }
     
-    // Get all model files
-    const modelPaths = this.getAvailableModels();
+    console.log(`Querying model with prompt: "${prompt}"`);
+    this.logInfo(`Querying model: ${path.basename(modelPath)}`);
     
-    if (modelPaths.length === 0) {
-      const errorMsg = 'No model files found in the models directory. Please add at least one .gguf file.';
-      console.error(errorMsg);
-      this.logError(errorMsg);
-      return [{ error: errorMsg }];
-    }
+    // Set up environment variables
+    const env = this.getProcessEnvironment();
     
-    console.log(`Found ${modelPaths.length} models for benchmarking:`);
-    modelPaths.forEach(modelPath => console.log(`- ${path.basename(modelPath)}`));
-    
-    const results = [];
-    
-    // Test each model
-    for (const modelPath of modelPaths) {
-      const modelName = path.basename(modelPath);
-      const modelNameWithoutExt = path.basename(modelPath, '.gguf');
-      console.log(`\n\n===== Testing model: ${modelNameWithoutExt} =====\n`);
-      this.logInfo(`Testing model: ${modelNameWithoutExt}`);
-      
-      try {
-        const startTime = Date.now();
-        let modelOutput = '';
-        let tokenCount = 0;
-        
-        // Set up environment variables
-        const env = { ...process.env };
-        
-        // Set dynamic library paths based on platform
-        if (process.platform === 'darwin') {
-          // macOS
-          env.DYLD_LIBRARY_PATH = [this.libPath, env.DYLD_LIBRARY_PATH].filter(Boolean).join(':');
-          env.DYLD_FALLBACK_LIBRARY_PATH = this.libPath;
-        } else if (process.platform === 'linux') {
-          // Linux
-          env.LD_LIBRARY_PATH = [this.libPath, env.LD_LIBRARY_PATH].filter(Boolean).join(':');
-        } else if (process.platform === 'win32') {
-          // Windows
-          env.PATH = [this.libPath, env.PATH].filter(Boolean).join(path.delimiter);
-        }
-        
-        // Run in the binary directory to make sure relative paths work
-        const cwd = path.dirname(this.llamaBinaryPath);
-        
-        // Run the model with the prompt
-        console.log(`Running model with prompt: "${prompt}"`);
-        
-        // Get the version of llama-cli to check what parameters it supports
-        try {
-          const versionOutput = execSync(`"${this.llamaBinaryPath}" -h`, { env, cwd }).toString();
-          console.log("Checking llama-cli version and available parameters...");
-          
-          // Modified command line arguments - removed unsupported flags
-          const args = [
-            '-m', modelPath,
-            '-p', prompt,
-            '--temp', '0.7',
-            '--seed', '42',
-            '--ctx-size', '2048',
-            '--batch-size', '512',
-            '--threads', Math.max(1, os.cpus().length - 1).toString(),
-            '--n-predict', '500'
-          ];
-          
-          // Add parameters that might be specific to certain versions
-          if (versionOutput.includes('--no-display-prompt')) {
-            args.push('--no-display-prompt');
-          }
-          
-          if (versionOutput.includes('--no-mmap')) {
-            args.push('--no-mmap');
-          }
-          
-          // Disable interactive mode if possible
-          if (versionOutput.includes('--no-interactive')) {
-            args.push('--no-interactive');
-          }
-          
-          // Disable conversation mode if possible
-          if (versionOutput.includes('--no-cnv')) {
-            args.push('--no-cnv');
-          } else if (versionOutput.includes('-no-cnv')) {
-            args.push('-no-cnv');
-          }
-          
-          // Start the child process
-          const child = spawn(this.llamaBinaryPath, args, { 
-            env, 
-            cwd,
-            stdio: ['pipe', 'pipe', 'pipe'] // Make sure we can write to stdin
-          });
-          
-          // Handle possible interactive mode by closing stdin immediately
-          if (child.stdin) {
-            child.stdin.end();
-          }
-          
-          const outputPromise = new Promise<string>((resolve, reject) => {
-            // Set a timeout to detect if the process is stuck in interactive mode
-            const timeoutId = setTimeout(() => {
-              console.log("Process appears to be stuck in interactive mode, attempting to exit...");
-              if (child.stdin) {
-                // Try to exit by sending 'q' and Enter
-                child.stdin.write('q\n');
-                setTimeout(() => {
-                  // If still running, try to kill
-                  if (!child.killed) {
-                    console.log("Still running, attempting to kill process...");
-                    child.kill('SIGINT');
-                  }
-                }, 1000);
-              }
-            }, 10000); // 10 second timeout
-
-            // Track if we're in a prompt or response section
-            let inPromptSection = true;
-            let responseStarted = false;
-            
-            // Collect output
-            child.stdout.on('data', (data) => {
-              const text = data.toString();
-              console.log(`Model stdout: ${text}`);
-              
-              // If we see output, clear the timeout
-              clearTimeout(timeoutId);
-              
-              // Always collect the stdout output
-              modelOutput += text;
-              
-              // Count tokens for metrics
-              const words = text.split(/\s+/).filter(Boolean);
-              tokenCount += words.length;
-            });
-            
-            // Handle errors
-            child.stderr.on('data', (data) => {
-              const err = data.toString();
-              // Log all stderr output for debugging
-              console.error(`Model stderr: ${err}`);
-              
-              // Clear timeout if we're getting any feedback
-              clearTimeout(timeoutId);
-            });
-            
-            // Handle process completion
-            child.on('close', (code) => {
-              // Clear the timeout
-              clearTimeout(timeoutId);
-              
-              const endTime = Date.now();
-              const elapsedSecs = (endTime - startTime) / 1000;
-              
-              console.log(`Model process finished with code ${code}`);
-              console.log(`Time taken: ${elapsedSecs.toFixed(2)} seconds`);
-              console.log(`Output length: ${modelOutput.length} characters`);
-              
-              // Ensure we have some output to show
-              if (modelOutput.length > 0) {
-                console.log(`Output sample: ${modelOutput.substring(0, 200)}...`);
-                resolve(modelOutput);
-              } else {
-                reject(new Error(`Model process exited with code ${code}`));
-              }
-            });
-            
-            // Handle process errors
-            child.on('error', (error) => {
-              // Clear the timeout
-              clearTimeout(timeoutId);
-              
-              console.error(`Failed to start model process: ${error.message}`);
-              reject(error);
-            });
-          });
-          
-          try {
-            // Wait for the model to finish
-            const output = await outputPromise;
-            const endTime = Date.now();
-            const elapsedSecs = (endTime - startTime) / 1000;
-            const tokensPerSec = tokenCount / elapsedSecs;
-            
-            const result = {
-              model: modelNameWithoutExt,
-              timeSeconds: elapsedSecs,
-              outputLength: output.length,
-              tokenCount: tokenCount,
-              tokensPerSecond: tokensPerSec,
-              output: output.substring(0, 500) + (output.length > 500 ? '...' : '') // Truncate long outputs
-            };
-            
-            results.push(result);
-            console.log(`Benchmark successful for ${modelNameWithoutExt}`);
-            this.logInfo(`Benchmark successful for ${modelNameWithoutExt}: ${tokensPerSec.toFixed(2)} tokens/sec`);
-          } catch (error) {
-            console.error(`Error during model execution: ${error}`);
-            this.logError(`Error benchmarking ${modelNameWithoutExt}: ${error}`);
-            
-            results.push({
-              model: modelNameWithoutExt,
-              error: error instanceof Error ? error.message : String(error)
-            });
-          }
-          
-        } catch (versionError) {
-          console.error(`Error checking llama-cli version: ${versionError}`);
-          this.logError(`Error checking llama-cli version: ${versionError}`);
-          
-          // Fallback to basic parameters if we can't check version
-          const args = [
-            '-m', modelPath,
-            '-p', prompt,
-            '--temp', '0.7',
-            '--seed', '42',
-            '--n-predict', '100'
-          ];
-          
-          const child = spawn(this.llamaBinaryPath, args, { env, cwd });
-          
-          let fallbackOutput = '';
-          
-          child.stdout.on('data', (data) => {
-            const text = data.toString();
-            fallbackOutput += text;
-          });
-          
-          child.stderr.on('data', (data) => {
-            console.error(`Fallback model stderr: ${data.toString()}`);
-          });
-          
-          // Wait for the process to complete
-          await new Promise<void>((resolve) => {
-            child.on('close', (code) => {
-              console.log(`Fallback model process exited with code ${code}`);
-              
-              results.push({
-                model: modelNameWithoutExt,
-                output: fallbackOutput,
-                error: code !== 0 ? `Process exited with code ${code}` : undefined
-              });
-              
-              resolve();
-            });
-          });
-        }
-        
-        // Wait a bit between models to let system resources settle
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-      } catch (error) {
-        console.error(`Error setting up model ${modelNameWithoutExt}: ${error}`);
-        this.logError(`Error setting up model ${modelNameWithoutExt}: ${error}`);
-        
-        results.push({
-          model: modelNameWithoutExt,
-          error: error instanceof Error ? error.message : String(error)
-        });
-      }
-    }
-    
-    // Save benchmark results to file
-    const timestamp = new Date().toISOString().replace(/:/g, '-');
-    const benchmarkPath = path.join(path.dirname(this.logFilePath), `llama-benchmark-${timestamp}.json`);
+    // Run in the binary directory to make sure relative paths work
+    const cwd = path.dirname(this.llamaBinaryPath);
     
     try {
-      fs.writeFileSync(benchmarkPath, JSON.stringify(results, null, 2));
-      console.log(`\nBenchmark results saved to ${benchmarkPath}`);
-      this.logInfo(`Benchmark results saved to ${benchmarkPath}`);
-    } catch (error) {
-      console.error(`Error writing benchmark results: ${error}`);
-      this.logError(`Error writing benchmark results: ${error}`);
-    }
-    
-    // Print a summary
-    console.log(`\n==================================================`);
-    console.log(`BENCHMARK RESULTS SUMMARY:`);
-    console.log(`==================================================`);
-    for (const result of results) {
-      if ('error' in result && result.error) {
-        console.log(`${result.model}: ERROR - ${result.error}`);
-      } else if ('output' in result && result.output) {
-        console.log(`${result.model}: ${result.tokensPerSecond.toFixed(2)} tokens/sec, ${result.outputLength} chars`);
+      // Get the version of llama-cli to check what parameters it supports
+      const versionOutput = execSync(`"${this.llamaBinaryPath}" -h`, { env, cwd }).toString();
+      
+      // Build command line arguments
+      const args = [
+        '-m', modelPath,
+        '-p', prompt,
+        '--temp', mergedOptions.temperature!.toString(),
+        '--seed', mergedOptions.seed!.toString(),
+        '--ctx-size', mergedOptions.contextSize!.toString(),
+        '--n-predict', mergedOptions.maxTokens!.toString(),
+        '--threads', Math.max(1, os.cpus().length - 1).toString()
+      ];
+      
+      // Add parameters that might be specific to certain versions
+      if (versionOutput.includes('--top-p')) {
+        args.push('--top-p', mergedOptions.topP!.toString());
+      }
+      
+      if (versionOutput.includes('--no-display-prompt')) {
+        args.push('--no-display-prompt');
+      }
+      
+      // Disable interactive mode if possible
+      if (versionOutput.includes('--no-interactive')) {
+        args.push('--no-interactive');
+      }
+      
+      // Disable conversation mode if possible
+      if (versionOutput.includes('--no-cnv')) {
+        args.push('--no-cnv');
+      } else if (versionOutput.includes('-no-cnv')) {
+        args.push('-no-cnv');
+      }
+      
+      if (mergedOptions.streaming) {
+        return this.streamingQuery(args, env, cwd);
       } else {
-        console.log(`${result.model}: No output generated`);
+        return this.standardQuery(args, env, cwd);
+      }
+    } catch (error) {
+      console.error(`Error querying model: ${error}`);
+      this.logError(`Error querying model: ${error}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Standard non-streaming query to the model
+   */
+  private async standardQuery(args: string[], env: NodeJS.ProcessEnv, cwd: string): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      // Start the child process
+      const child = spawn(this.llamaBinaryPath, args, { 
+        env, 
+        cwd,
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+      
+      // Generate a unique ID for this process
+      const processId = `query_${Date.now()}`;
+      this.activeProcesses.set(processId, child);
+      
+      let modelOutput = '';
+      
+      // Handle possible interactive mode by closing stdin immediately
+      if (child.stdin) {
+        child.stdin.end();
+      }
+      
+      // Collect output
+      child.stdout.on('data', (data) => {
+        const text = data.toString();
+        modelOutput += text;
+      });
+      
+      // Handle errors
+      child.stderr.on('data', (data) => {
+        const err = data.toString();
+        console.error(`Model stderr: ${err}`);
+      });
+      
+      // Handle process completion
+      child.on('close', (code) => {
+        this.activeProcesses.delete(processId);
+        
+        if (code === 0) {
+          resolve(modelOutput);
+        } else {
+          reject(new Error(`Model process exited with code ${code}`));
+        }
+      });
+      
+      // Handle process errors
+      child.on('error', (error) => {
+        this.activeProcesses.delete(processId);
+        reject(error);
+      });
+    });
+  }
+
+  /**
+   * Streaming query that returns an EventEmitter
+   */
+  private streamingQuery(args: string[], env: NodeJS.ProcessEnv, cwd: string): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      try {
+        // Start the child process
+        const child = spawn(this.llamaBinaryPath, args, { 
+          env, 
+          cwd,
+          stdio: ['pipe', 'pipe', 'pipe']
+        });
+        
+        // Generate a unique ID for this process
+        const processId = `stream_${Date.now()}`;
+        this.activeProcesses.set(processId, { process: child });
+        
+        let fullOutput = '';
+        
+        // Handle possible interactive mode by closing stdin immediately
+        if (child.stdin) {
+          child.stdin.end();
+        }
+        
+        // Collect and emit output
+        child.stdout.on('data', (data) => {
+          try {
+            const text = data.toString();
+            fullOutput += text;
+            // Emit from the LlamaService instance directly
+            this.emit('data', text);
+          } catch (error) {
+            console.error('Error processing stdout data:', error);
+          }
+        });
+        
+        // Handle errors
+        child.stderr.on('data', (data) => {
+          try {
+            const err = data.toString();
+            console.error(`Model stderr: ${err}`);
+            // Don't treat stderr as an error unless it's clearly an error message
+            // Many LLMs output debug info to stderr
+            if (err.toLowerCase().includes('error') || 
+                err.toLowerCase().includes('exception') || 
+                err.toLowerCase().includes('fatal')) {
+              this.emit('error', err);
+            }
+          } catch (error) {
+            console.error('Error processing stderr data:', error);
+          }
+        });
+        
+        // Handle process completion
+        child.on('close', (code) => {
+          try {
+            this.activeProcesses.delete(processId);
+            
+            if (code === 0 || code === null) {
+              // Emit from the LlamaService instance directly
+              this.emit('end', fullOutput);
+              resolve(fullOutput);
+            } else {
+              const error = new Error(`Model process exited with code ${code}`);
+              // Emit from the LlamaService instance directly
+              this.emit('error', error);
+              reject(error);
+            }
+          } catch (error) {
+            console.error('Error in process close handler:', error);
+            reject(error);
+          }
+        });
+        
+        // Handle process errors
+        child.on('error', (error) => {
+          try {
+            this.activeProcesses.delete(processId);
+            // Emit from the LlamaService instance directly
+            this.emit('error', error);
+            reject(error);
+          } catch (innerError) {
+            console.error('Error in process error handler:', innerError);
+            reject(innerError);
+          }
+        });
+      } catch (error) {
+        console.error('Error setting up streaming query:', error);
+        reject(error);
+      }
+    });
+  }
+
+  /**
+   * Stop all active model processes
+   */
+  public stopAllProcesses(): void {
+    for (const [id, processData] of this.activeProcesses) {
+      try {
+        if ('process' in processData) {
+          processData.process.kill('SIGINT');
+        } else {
+          processData.kill('SIGINT');
+        }
+        console.log(`Stopped process ${id}`);
+      } catch (error) {
+        console.error(`Error stopping process ${id}: ${error}`);
       }
     }
-    console.log(`==================================================\n`);
     
-    return results;
+    this.activeProcesses.clear();
   }
 }
 
 // Create a singleton instance
 export const llamaService = new LlamaService();
-
-/**
- * Benchmark all available models with a given prompt
- * @param prompt The prompt to test with
- * @returns Promise that resolves with benchmark results
- */
-export async function benchmarkAllModels(prompt: string): Promise<any[]> {
-  const rawResults = await llamaService.benchmarkAllModels(prompt);
-  
-  // Transform the results to match the expected structure in the main function
-  const formattedResults = rawResults.map(result => {
-    if ('error' in result && result.error) {
-      // If there was an error, keep the same structure
-      return {
-        model: result.model,
-        error: result.error
-      };
-    } else {
-      // Format successful results to match the expected metrics structure
-      return {
-        model: result.model,
-        output: result.output,
-        metrics: {
-          tokensPerSec: result.tokensPerSecond,
-          setupTime: result.timeSeconds - (result.tokenCount / result.tokensPerSecond), // Estimate setup time
-          generationTime: result.tokenCount / result.tokensPerSecond, // Estimate generation time
-          totalTime: result.timeSeconds,
-          outputLength: result.outputLength,
-          tokenCount: result.tokenCount
-        }
-      };
-    }
-  });
-  
-  return formattedResults;
-}

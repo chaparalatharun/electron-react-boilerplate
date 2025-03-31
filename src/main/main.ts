@@ -1,5 +1,4 @@
 /* eslint global-require: off, no-console: off, promise/always-return: off */
-
 /**
  * This module executes inside of electron's main process. You can start
  * electron renderer process from here and communicate with the other processes
@@ -10,46 +9,37 @@
  */
 import path from 'path';
 import { app, BrowserWindow, shell, ipcMain } from 'electron';
+import fs from 'fs';
 import { autoUpdater } from 'electron-updater';
 import log from 'electron-log';
 import MenuBuilder from './menu';
 import { resolveHtmlPath } from './util';
+import { llamaService } from './llama-service'; // Import the service
 
-import {benchmarkAllModels } from './llama-service';
 
-app
-  .whenReady()
-  .then(async () => {
-    createWindow();
-
-    // Check for benchmark mode
-    if (process.env.BENCHMARK === 'true') {
-      console.log("\n\n==================================================");
-      console.log("RUNNING LLM BENCHMARK - TESTING ALL MODELS");
-      console.log("==================================================\n");
-      
-      const prompt = "tell me about electron.js";
-      const results = await benchmarkAllModels(prompt);
-      
-      console.log("\n\n==================================================");
-      console.log("BENCHMARK RESULTS SUMMARY:");
-      console.log("==================================================");
-      results.forEach(result => {
-        if (result.error) {
-          console.log(`${result.model}: ERROR - ${result.error}`);
-        } else {
-          console.log(`${result.model}: ${result.metrics.tokensPerSec.toFixed(2)} tokens/sec`);
-          console.log(`  Setup: ${result.metrics.setupTime.toFixed(2)}s, Gen: ${result.metrics.generationTime.toFixed(2)}s`);
-        }
-      });
-      console.log("==================================================\n");
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception in main process:', error);
+  
+  // Log to file
+  try {
+    const logDir = app.getPath('userData');
+    const logFile = path.join(logDir, 'uncaught-exceptions.log');
+    
+    // Ensure log directory exists
+    if (!fs.existsSync(logDir)) {
+      fs.mkdirSync(logDir, { recursive: true });
     }
     
-    app.on('activate', () => {
-      if (mainWindow === null) createWindow();
-    });
-  })
-  .catch(console.log);
+    // Log the error with timestamp
+    const timestamp = new Date().toISOString();
+    fs.appendFileSync(
+      logFile, 
+      `[${timestamp}] Uncaught exception: ${error.message}\n${error.stack}\n\n`
+    );
+  } catch (logError) {
+    console.error('Error logging uncaught exception:', logError);
+  }
+});
 
 class AppUpdater {
   constructor() {
@@ -60,6 +50,143 @@ class AppUpdater {
 }
 
 let mainWindow: BrowserWindow | null = null;
+
+// Set up IPC handlers for LlamaService
+function setupLlamaIpcHandlers() {
+  // Check if models are available
+  ipcMain.handle('llama:has-models', async () => {
+    return llamaService.hasModels();
+  });
+
+  // Get list of available models
+  ipcMain.handle('llama:get-models', async () => {
+    return llamaService.getAvailableModels();
+  });
+
+  // Get detailed model information
+  ipcMain.handle('llama:check-models', async () => {
+    return llamaService.checkModels();
+  });
+
+  // Load a model
+  ipcMain.handle('llama:load-model', async (_, modelPath) => {
+    try {
+      const success = await llamaService.loadModel(modelPath);
+      return { success };
+    } catch (error) {
+      console.error('Error loading model:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return { success: false, error: errorMessage };
+    }
+  });
+
+  // Query a model with a prompt
+  ipcMain.handle('llama:query-model', async (_, { prompt, options }) => {
+    try {
+      const response = await llamaService.queryModel(prompt, options);
+      return { success: true, response };
+    } catch (error) {
+      console.error('Error querying model:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return { success: false, error: errorMessage };
+    }
+  });
+
+  // Handle streaming queries
+  // Handle streaming queries
+ipcMain.on('llama:stream-query', async (event, { prompt, options }) => {
+  try {
+    // Create a unique ID for this query
+    const queryId = Date.now().toString();
+    
+    // Set up the streaming options
+    const streamingOptions = { 
+      ...options, 
+      streaming: true,
+      // Use conservative settings for streaming
+      contextSize: Math.min(options.contextSize || 2048, 512),
+      maxTokens: Math.min(options.maxTokens || 500, 100),
+      batchSize: 64
+    };
+    
+    // Set up event listeners before making the query
+    const dataHandler = (chunk: string) => {
+      try {
+        event.reply('llama:stream-data', { queryId, chunk });
+      } catch (error) {
+        console.error('Error in data handler:', error);
+      }
+    };
+    
+    const errorHandler = (error: Error | string) => {
+      try {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        event.reply('llama:stream-error', { queryId, error: errorMessage });
+        cleanup();
+      } catch (innerError) {
+        console.error('Error in error handler:', innerError);
+      }
+    };
+    
+    const endHandler = (fullResponse: string) => {
+      try {
+        event.reply('llama:stream-end', { queryId, fullResponse });
+        cleanup();
+      } catch (innerError) {
+        console.error('Error in end handler:', innerError);
+      }
+    };
+    
+    // Clean up function to remove listeners
+    const cleanup = () => {
+      try {
+        llamaService.removeListener('data', dataHandler);
+        llamaService.removeListener('error', errorHandler);
+        llamaService.removeListener('end', endHandler);
+      } catch (error) {
+        console.error('Error cleaning up listeners:', error);
+      }
+    };
+    
+    // Add listeners to the emitter
+    llamaService.on('data', dataHandler);
+    llamaService.on('error', errorHandler);
+    llamaService.on('end', endHandler);
+    
+    // Notify that streaming is starting
+    event.reply('llama:stream-start', { queryId });
+    
+    // Start the streaming query
+    try {
+      llamaService.queryModel(prompt, streamingOptions)
+        .catch((error) => {
+          console.error('Error in streaming query:', error);
+          errorHandler(error);
+        });
+    } catch (error) {
+      console.error('Error starting streaming query:', error);
+      errorHandler(error);
+    }
+    
+  } catch (error) {
+    console.error('Global error in stream handler:', error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    event.reply('llama:stream-error', { error: errorMessage });
+  }
+});
+
+  // Stop all active model processes
+  ipcMain.handle('llama:stop-processes', async () => {
+    try {
+      llamaService.stopAllProcesses();
+      return { success: true };
+    } catch (error) {
+      console.error('Error stopping processes:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return { success: false, error: errorMessage };
+    }
+  });
+}
 
 ipcMain.on('ipc-example', async (event, arg) => {
   const msgTemplate = (pingPong: string) => `IPC test: ${pingPong}`;
@@ -83,7 +210,6 @@ const installExtensions = async () => {
   const installer = require('electron-devtools-installer');
   const forceDownload = !!process.env.UPGRADE_EXTENSIONS;
   const extensions = ['REACT_DEVELOPER_TOOLS'];
-
   return installer
     .default(
       extensions.map((name) => installer[name]),
@@ -142,12 +268,16 @@ const createWindow = async () => {
     return { action: 'deny' };
   });
 
+  // Set up IPC handlers
+  setupLlamaIpcHandlers();
+
   new AppUpdater();
 };
 
-
-
 app.on('window-all-closed', () => {
+  // Stop all active model processes when closing the app
+  llamaService.stopAllProcesses();
+  
   if (process.platform !== 'darwin') {
     app.quit();
   }

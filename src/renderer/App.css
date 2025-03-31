@@ -6,14 +6,9 @@ body {
   position: relative;
   color: white;
   height: 100vh;
-  background: linear-gradient(
-    200.96deg,
-    #fedc2a -29.09%,
-    #dd5789 51.77%,
-    #7a2c9e 129.35%
-  );
+  background: black;
   font-family: sans-serif;
-  overflow-y: hidden;
+  overflow: auto;
   display: flex;
   justify-content: center;
   align-items: center;

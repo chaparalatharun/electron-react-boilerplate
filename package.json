@@ -35,6 +35,8 @@
   ],
   "main": "./.erb/dll/main.bundle.dev.js",
   "scripts": {
+    "build-llama": "ts-node scripts/build-llama.ts",
+    "benchmark": "ts-node scripts/benchmark.ts --prompt",
     "build": "concurrently \"npm run build:main\" \"npm run build:renderer\"",
     "build:dll": "cross-env NODE_ENV=development TS_NODE_TRANSPILE_ONLY=true NODE_OPTIONS=\"-r ts-node/register --no-warnings\" webpack --config ./.erb/configs/webpack.config.renderer.dev.dll.ts",
     "build:main": "cross-env NODE_ENV=production TS_NODE_TRANSPILE_ONLY=true NODE_OPTIONS=\"-r ts-node/register --no-warnings\" webpack --config ./.erb/configs/webpack.config.main.prod.ts",
@@ -102,6 +104,7 @@
   },
   "dependencies": {
     "@electron/notarize": "^3.0.0",
+    "dotenv": "^16.4.7",
     "electron-debug": "^4.1.0",
     "electron-log": "^5.3.2",
     "electron-updater": "^6.3.9",
@@ -111,6 +114,7 @@
   },
   "devDependencies": {
     "@electron/rebuild": "^3.7.1",
+    "@jest/globals": "^29.7.0",
     "@pmmmwh/react-refresh-webpack-plugin": "^0.5.15",
     "@svgr/webpack": "^8.1.0",
     "@teamsupercell/typings-for-css-modules-loader": "^2.5.2",
@@ -162,7 +166,7 @@
     "sass-loader": "^16.0.5",
     "style-loader": "^4.0.0",
     "terser-webpack-plugin": "^5.3.14",
-    "ts-jest": "^29.2.6",
+    "ts-jest": "^29.3.0",
     "ts-loader": "^9.5.2",
     "ts-node": "^10.9.2",
     "tsconfig-paths-webpack-plugin": "^4.2.0",
