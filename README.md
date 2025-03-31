@@ -1,4 +1,46 @@
-# Electron + Local LLM Application
+## Configuration
+
+The LlamaService can be configured through the following options when calling `queryModel`:
+
+```typescript
+// Example options
+const options = {
+  temperature: 0.7,    // Controls randomness (0.0 to 1.0)
+  topP: 0.9,           // Nucleus sampling parameter
+  maxTokens: 500,      // Maximum tokens to generate
+  seed: 42,            // Random seed for reproducibility
+  contextSize: 2048,   // Context window size
+  streaming: false     // Whether to stream the response
+};
+
+// Query with options
+const response = await llamaService.queryModel("Your prompt here", options);
+```
+
+These options let you fine-tune the model's behavior for different use cases:
+- Higher temperature (>0.7) produces more creative outputs
+- Lower temperature (<0.3) produces more deterministic outputs
+- Higher maxTokens allows for longer responses but takes more time
+- Streaming mode is ideal for real-time UI updates## IPC Communication
+
+The application uses Electron's IPC (Inter-Process Communication) system to communicate between the renderer process (UI) and the main process (where LlamaService runs). The following IPC channels are available:
+
+### From Renderer to Main Process
+- `llama:has-models`: Checks if any models are available
+- `llama:get-models`: Gets a list of available model paths
+- `llama:check-models`: Gets detailed model information (size, type, quantization)
+- `llama:load-model`: Loads a specific model for use
+- `llama:query-model`: Queries a model with a prompt (non-streaming)
+- `llama:stream-query`: Starts a streaming query
+- `llama:stop-processes`: Stops all running model processes
+
+### From Main to Renderer Process
+- `llama:stream-start`: Notifies that streaming has started
+- `llama:stream-data`: Delivers a chunk of text during streaming
+- `llama:stream-error`: Notifies of an error during streaming
+- `llama:stream-end`: Notifies that streaming has completed
+
+This IPC system allows the React UI to interact with the LlamaService running in the main Electron process.# Electron + Local LLM Application
 
 This application integrates a Local Large Language Model (LLM) with Electron, using React for the frontend and llama.cpp for the model inference. Designed for cross-platform desktop usage, it leverages your local GPU resources for optimized inference.
 
@@ -35,17 +77,37 @@ When you run:
 ```bash
 npm start
 ```
-it creates a folder named `llama` within the `src/main` directory, including a subdirectory called `models`. Place the `.gguf` file(s) of the model(s) you want to use into this `models` folder.
+it initializes the application. The LLM models should be placed in the `assets/llama/models` directory. Place your `.gguf` file(s) in this folder to make them available to the application.
 
-## Build Llama
-To build the llama.cpp binaries for your platform, run:
+## Scripts
+
+The application includes several utility scripts to help with development and testing:
+
+### Build Llama Script
+Located at `/scripts/build-llama.ts`, this script handles setting up the llama.cpp environment:
+
 ```bash
 npm run build-llama
 ```
-This script handles:
-- Cloning the llama.cpp repository
-- Compiling the source code
-- Setting up necessary libraries and binaries
+
+The script performs the following actions:
+- Clones the llama.cpp repository from GitHub
+- Compiles the source code with platform-specific optimizations
+- Copies the resulting binaries and libraries to the appropriate locations in `/assets/llama/`
+- Sets up the necessary directory structure for the application
+
+### Benchmark Script
+Located at `/scripts/benchmark.ts`, this script benchmarks LLM models:
+
+```bash
+npm run benchmark [options]
+```
+
+Options:
+- `--prompt "Your prompt here"`: Specify a custom prompt for benchmarking
+- `--models-dir "/path/to/models"`: Specify a custom directory containing model files
+
+The script automatically discovers all GGUF models in the models directory and benchmarks them one by one, generating performance metrics for comparison.
 
 ## Benchmarking Models
 
@@ -114,6 +176,7 @@ Please note the actual directory structure of the repository:
 │   │   ├── llama-service.ts  # The LlamaService implementation
 │   │   └── main.ts    # Main entry point with IPC handlers 
 │   └── renderer     # Frontend UI code
+│       └── components  # React components for the UI
 ├── scripts
 │   ├── build-llama.ts   # Script to build llama.cpp
 │   └── benchmark.ts     # Script for benchmarking models
@@ -126,6 +189,7 @@ Please note the actual directory structure of the repository:
 - `/logs`: Stores logs related to model initialization and errors (in development mode)
 - `/scripts`: Contains utility scripts for building and benchmarking
 - `/src/main`: Contains the Electron main process code including LlamaService
+- `/src/renderer/components`: Contains React components for the UI
 
 ## LlamaService API
 
