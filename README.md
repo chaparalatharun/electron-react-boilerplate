@@ -96,6 +96,54 @@ The script performs the following actions:
 - Copies the resulting binaries and libraries to the appropriate locations in `/assets/llama/`
 - Sets up the necessary directory structure for the application
 
+## Bundle Model Script
+
+The `bundle-model.ts` script helps automate downloading or bundling GGUF models from Hugging Face or local sources into your project. It supports multiple ways to specify the model and works with public/private repositories using Hugging Face tokens.
+
+### Location
+Located at: `/scripts/bundle-model.ts`
+
+### Default Model
+If no arguments are provided, the script downloads the following model:
+- **Repo**: `TheBloke/deepseek-llm-3B-chat-GGUF`
+- **File**: `deepseek-llm-3b-chat.Q4_0.gguf`
+
+### Usage
+Run with the default model:
+```bash
+npm run bundle-model
+```
+
+Specify a Hugging Face model and specific file:
+```bash
+npm run bundle-model -- --model TheBloke/deepseek-llm-3B-chat-GGUF --file deepseek-llm-3b-chat.Q5_K_M.gguf
+```
+
+You can also use positional arguments:
+```bash
+npm run bundle-model -- TheBloke/deepseek-llm-3B-chat-GGUF deepseek-llm-3b-chat.Q5_K_M.gguf
+```
+
+Optional output path:
+```bash
+npm run bundle-model -- --model TheBloke/deepseek-llm-3B-chat-GGUF --file model.gguf --output ./custom/models
+```
+
+### Behavior
+- Supports `http(s)` URLs for direct downloads
+- Automatically checks if the file already exists and skips downloading if it does
+- Handles HTTP 302 redirects from Hugging Face
+- Uses `.env` for Hugging Face token authentication (`HUGGINGFACE_TOKEN`)
+
+### Notes
+- Downloaded models are placed in `assets/llama/models` by default.
+- Use a `.env` file with `HUGGINGFACE_TOKEN=your_token_here` if accessing private models.
+
+This script is useful for automating model setup in CI or managing different quantizations without manual intervention.
+
+
+
+
 ### Benchmark Script
 Located at `/scripts/benchmark.ts`, this script benchmarks LLM models:
 
