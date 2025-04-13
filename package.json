@@ -36,6 +36,7 @@
   "main": "./.erb/dll/main.bundle.dev.js",
   "scripts": {
     "build-llama": "ts-node scripts/build-llama.ts",
+    "bundle-model": "ts-node scripts/bundle-model.ts",
     "benchmark": "ts-node scripts/benchmark.ts --prompt",
     "build": "concurrently \"npm run build:main\" \"npm run build:renderer\"",
     "build:dll": "cross-env NODE_ENV=development TS_NODE_TRANSPILE_ONLY=true NODE_OPTIONS=\"-r ts-node/register --no-warnings\" webpack --config ./.erb/configs/webpack.config.renderer.dev.dll.ts",
@@ -104,10 +105,12 @@
   },
   "dependencies": {
     "@electron/notarize": "^3.0.0",
+    "cli-progress": "^3.12.0",
     "dotenv": "^16.4.7",
     "electron-debug": "^4.1.0",
     "electron-log": "^5.3.2",
     "electron-updater": "^6.3.9",
+    "node-fetch": "^2.7.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.3.0"
@@ -122,6 +125,7 @@
     "@testing-library/react": "^16.2.0",
     "@types/jest": "^29.5.14",
     "@types/node": "22.13.10",
+    "@types/node-fetch": "^2.6.12",
     "@types/react": "^19.0.11",
     "@types/react-dom": "^19.0.4",
     "@types/react-test-renderer": "^19.0.0",
